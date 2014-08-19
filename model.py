@@ -1,8 +1,10 @@
 import numpy as np
-from pymc import Deterministic, Model, T, Uniform, Exponential, Normal
+from pymc import Binomial, Gamma, Deterministic, Model, T, Uniform, Exponential, Normal
 import theano.tensor as Tns
 import pymc as pm
+from pymc.utils import normcdf
 from pylab import *
+from scipy.stats import norm, binom
 
 def best(name_a, data_a, name_b, data_b):
     pooled_data = np.concatenate([data_a,data_b])
@@ -132,8 +134,6 @@ def run_fixdur():
                 progressbar=True, trace='text') 
     return trace
 
-        
-
 def run_pl():
     x = arange(180)
     x = concatenate((x,x,x,x))
@@ -147,10 +147,42 @@ def run_pl():
         trace = pm.sample(2000, step, {}, tune=50, njobs=1, progressbar=True)
     return trace
 
+def phi(x):
+    return (1+Tns.erf(x))*.5
+
+def sig_detect(signal_responses, noise_responses, num_observers, num_trials):
+    with Model() as model:
+        md = Normal('Pr. mean discrim.', mu=0, tau=0.001)
+        mc = Normal('Pr. mean bias', mu=0, tau=0.001)
+        taud = Gamma('Pr. tau discrim.', 0.001, 0.001)
+        tauc = Gamma('Pr. tau bias', 0.001, 0.001)
+
+        discriminability = Normal('Discriminability', mu=md, tau=taud, shape=num_observers)
+        bias = Normal('Bias', mu=mc, tau=tauc, shape=num_observers)
+        
+
+        hi = phi(0.5*(discriminability-bias))
+        fi = phi(-0.5*(discriminability-bias))
+        
+        counts_signal = Binomial('Signal trials', num_trials, hi, observed=signal_responses)
+        counts_noise = Binomial('Noise trials', num_trials, fi, observed=noise_responses)
+    return model
+
+
+def run_sig():
+    signal_responses = binom.rvs(100, 0.75, size=10)
+    noise_responses = binom.rvs(100, 0.25, size=10)
+    m = sig_detect(signal_responses, noise_responses, 10, 100)
+    with m:
+        step = pm.Metropolis()
+        #start = pm.find_MAP()
+        trace = pm.sample(50000, step, {}, tune=1000, njobs=1)
+    pm.traceplot(trace)
+
 if __name__ == '__main__':
-    t = run_fixdur()
+    t = run_sig()
     import cPickle
     cPickle.dump(t, open('trace.pickle', 'w'))
     #pm.traceplot(trace)
-    #show()
+    show()
 
