@@ -2,7 +2,6 @@ import numpy as np
 from pymc import Binomial, Gamma, Deterministic, Model, T, Uniform, Exponential, Normal
 import theano.tensor as Tns
 import pymc as pm
-from pymc.utils import normcdf
 from pylab import *
 from scipy.stats import norm, binom
 
@@ -12,7 +11,7 @@ def best(name_a, data_a, name_b, data_b):
     L = pooled_data.std()/1000.0
     H = pooled_data.std()*1000.0
     with Model() as best_model:
-        
+
         mean_prior_a = Normal('%s Mean'%name_a, mu=data_a.mean(), sd=H)
         mean_prior_b = Normal('%s Mean'%name_b, mu=data_b.mean(), sd=H)
 
@@ -22,13 +21,13 @@ def best(name_a, data_a, name_b, data_b):
         p = Uniform('I', lower=0.,upper=1.)
         n = 1 - 29* Tns.log(1-p)
         nu_prior = Deterministic('Nu-1', n)
-        
+
         std_a = 1.0/(std_prior_a**2)
         std_b = 1.0/(std_prior_b**2)
-        
-        group_one = T('Group %s'%name_a, nu_prior, mu = mean_prior_a,  
+
+        group_one = T('Group %s'%name_a, nu_prior, mu = mean_prior_a,
                 lam=std_a, observed=data_a)
-        group_two = T('Group %s'%name_b, nu_prior, mu = mean_prior_b, 
+        group_two = T('Group %s'%name_b, nu_prior, mu = mean_prior_b,
                 lam=std_b, observed=data_b)
     return best_model
 
@@ -39,7 +38,7 @@ def run_best():
     print 'A:', a.mean(), a.std()
     print 'B:', b.mean(), b.std()
     x_eval = np.linspace(-10,10,100)
-    
+
     m = best('A', a, 'B', b)
     start = {'A Mean': b.mean(),
         'A Std': a.std(),
@@ -64,12 +63,12 @@ def oneway_banova(y,X):
         betas = alphas - alphas.mean()
         betas = Deterministic('betas', betas)
 
-        data = Normal('data', mu= offset + Tns.dot(X.T, betas), 
+        data = Normal('data', mu= offset + Tns.dot(X.T, betas),
                 sd=sigma, observed=y)
     return banova
 
 def run_banova():
-    y = 10+hstack((np.random.randn(100),np.random.randn(100)+1, 
+    y = 10+hstack((np.random.randn(100),np.random.randn(100)+1,
         np.random.randn(100)+2))
     y = y-y.mean()
     y = y/y.std()
@@ -88,13 +87,13 @@ def run_banova():
 
 def piecewise_predictor(x, split, intercept, slope1, slope2):
     breakdummy = x<split
-    reg_full = np.array([np.ones(x.shape)*intercept, 
-        slope1*x, 
+    reg_full = np.array([np.ones(x.shape)*intercept,
+        slope1*x,
         slope2*((x-split)*breakdummy)])
     return reg_full.sum(0)
 
 
-def piecewise_linear(y,x): 
+def piecewise_linear(y,x):
     with Model() as pl:
         split = Uniform('Breakpoint', lower=0, upper=180)
         intercept = Normal('Offset', mu=y.mean(), sd=y.std()*1000)
@@ -108,11 +107,11 @@ def piecewise_durations(y,x,observer):
     num_observer = len(np.unique(observer))
     with Model() as pl:
         split = Uniform('Breakpoint', lower=0, upper=180, shape=num_observer)
-        
+
         obs_offset = Normal('Mean_offset', mu=y.mean(), sd=y.std()*1000)
         obs_slopes1 = Normal('Mean_slope1', mu=0,sd=100)
         obs_slopes2 = Normal('Mean_slope2', mu=0,sd=100)
-        
+
         intercept = Normal('Offsets', mu=obs_offset, sd=y.std()*1000, shape=num_observer)
         slopes1 = Normal('Slope1', mu=obs_slopes1, sd=100, shape=(num_observer))
         slopes2 = Normal('Slope2', mu=obs_slopes2, sd=100, shape=(num_observer))
@@ -131,7 +130,7 @@ def run_fixdur():
         step = pm.Metropolis()
         #step = pm.NUTS()
         trace = pm.sample(10000, step, {}, tune=150, njobs=2,
-                progressbar=True, trace='text') 
+                progressbar=True, trace='text')
     return trace
 
 def run_pl():
@@ -149,40 +148,43 @@ def run_pl():
 
 def phi(x):
     return (1+Tns.erf(x))*.5
+#    return .5 + .5*(Tns.erf(x/sqrt(2))) dasselbe wie dr[ber
 
 def sig_detect(signal_responses, noise_responses, num_observers, num_trials):
     with Model() as model:
-        md = Normal('Pr. mean discrim.', mu=0, tau=0.001)
-        mc = Normal('Pr. mean bias', mu=0, tau=0.001)
-        taud = Gamma('Pr. tau discrim.', 0.001, 0.001)
-        tauc = Gamma('Pr. tau bias', 0.001, 0.001)
+        md = Normal('Pr. mean discrim.', 0., tau=0.001)
+        mc = Normal('Pr. mean bias',     0., tau=0.001)
+        taud = Gamma('taud', 0.001, 0.001)
+        tauc = Gamma('tauc', 0.001, 0.001)
 
         discriminability = Normal('Discriminability', mu=md, tau=taud, shape=num_observers)
         bias = Normal('Bias', mu=mc, tau=tauc, shape=num_observers)
-        
 
-        hi = phi(0.5*(discriminability-bias))
+        hi = phi( 0.5*(discriminability-bias))
         fi = phi(-0.5*(discriminability-bias))
-        
+
         counts_signal = Binomial('Signal trials', num_trials, hi, observed=signal_responses)
-        counts_noise = Binomial('Noise trials', num_trials, fi, observed=noise_responses)
+        counts_noise  = Binomial('Noise trials',  num_trials, fi, observed=noise_responses)
     return model
 
 
 def run_sig():
-    signal_responses = binom.rvs(100, 0.75, size=10)
-    noise_responses = binom.rvs(100, 0.25, size=10)
+    signal_responses = binom.rvs(100, 0.69, size=10)
+    noise_responses  = binom.rvs(100, 0.69, size=10)
     m = sig_detect(signal_responses, noise_responses, 10, 100)
     with m:
-        step = pm.Metropolis()
+        step = pm.Metropolis(blocked=False)
         #start = pm.find_MAP()
-        trace = pm.sample(50000, step, {}, tune=1000, njobs=1)
-    pm.traceplot(trace)
+        #start = {'Pr. mean discrim.':0.0, 'Pr. mean bias':0.0,
+        #         'taud':0.001, 'tauc':0.001}
+        start = {}
 
+        trace = pm.sample(10000, step, start, tune=5000, njobs=2)
+    return trace
 if __name__ == '__main__':
     t = run_sig()
     import cPickle
     cPickle.dump(t, open('trace.pickle', 'w'))
-    #pm.traceplot(trace)
+    pm.traceplot(t)
     show()
 
