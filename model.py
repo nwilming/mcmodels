@@ -116,7 +116,7 @@ def piecewise_durations(y,x,observer):
         slopes1 = Normal('Slope1', mu=obs_slopes1, sd=100, shape=(num_observer))
         slopes2 = Normal('Slope2', mu=obs_slopes2, sd=100, shape=(num_observer))
 
-        mu = piecewise_predictor(x, split[observer], 
+        mu = piecewise_predictor(x, split[observer],
                 intercept[observer], slopes1[observer], slopes2[observer])
         data = Normal('Data', mu=mu, sd=y.std(), observed=y)
     return pl
@@ -169,18 +169,20 @@ def sig_detect(signal_responses, noise_responses, num_observers, num_trials):
 
 
 def run_sig():
-    signal_responses = binom.rvs(100, 0.69, size=10)
-    noise_responses  = binom.rvs(100, 0.69, size=10)
-    m = sig_detect(signal_responses, noise_responses, 10, 100)
+    signal_responses = binom.rvs(100, 0.69, size=1)
+    noise_responses  = binom.rvs(100, 0.30, size=1)
+    m = sig_detect(signal_responses, noise_responses, 1, 100)
     with m:
-        step = pm.Metropolis(blocked=False)
+        #step = pm.Metropolis(blocked=False)
+        #step = pm.NUTS()
+        step = pm.HamiltonianMC()
         #start = pm.find_MAP()
         #start = {'Pr. mean discrim.':0.0, 'Pr. mean bias':0.0,
         #         'taud':0.001, 'tauc':0.001}
         start = {}
-
-        trace = pm.sample(10000, step, start, tune=5000, njobs=2)
+        trace = pm.sample(10000, step, start, tune=1000, njobs=2)
     return trace
+
 if __name__ == '__main__':
     t = run_sig()
     import cPickle
