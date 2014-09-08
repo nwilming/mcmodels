@@ -1,9 +1,76 @@
+
 import numpy as np
-from pymc import Binomial, Gamma, Deterministic, Model, T, Uniform, Exponential, Normal
+from pymc import TruncatedNormal, Binomial, Gamma, Deterministic, Model, T, Uniform, Exponential, Normal
 import theano.tensor as Tns
 import pymc as pm
 from pylab import *
 from scipy.stats import norm, binom
+
+def save(traces, filename):
+    import h5py
+    with h5py.File(filename) as f:
+        for var in traces.varnames:
+            data = traces.get_values(var)
+            if type(data) == np.ndarray:
+                f.create_dataset(var, data=data)
+            else:
+                a = f.create_group(var)
+                for i, chain in enumerate(data):
+                    a.create_dataset('chain%d'%i, data=chain)
+
+
+def make_test_data(nobs = 10, split=45, intercept=250, slope1=1, slope2=-1):
+    x = array(range(180)*10)
+    fa, dur, obs = [],[],[]
+    for n in range(nobs):
+        fa.append(x)
+        obs.append(0*x+n)
+        dur.append(randn(len(x))*10 + piecewise_predictor(x, split, n*5+intercept, slope1, slope2))
+    return hstack(dur), hstack(fa), hstack(obs)
+
+
+def predict(traces, thin, burn):
+    offsets = traces['Offsets']
+    slope1 = traces['Slope1']
+    slope2 = traces['Slope2']
+    breakpoints = traces['Breakpoint']
+    try:
+        offsets.keys()
+        for chain in range(len(offsets)):
+            ch = 'chain%d'%chain
+            for idx in range(burn, len(offsets[ch]), thin):
+                x = arange(180)[:,np.newaxis]
+                y = piecewise_predictor(x, breakpoints[ch][idx], offsets[ch][idx],
+                        slope1[ch][idx], slope2[ch][idx])
+                plot(x,y, alpha=0.1)
+    except AttributeError:
+        for idx in range(burn, len(offsets), thin):
+            x = arange(180)[:,np.newaxis]
+            y = piecewise_predictor(x, breakpoints[idx], offsets[idx],
+                    slope1[idx], slope2[idx])
+            plot(x,y, 'k', alpha=0.1)
+
+def predict_mean(traces, thin, burn):
+    offsets = traces['Mean_offset']
+    slope1 = traces['Mean_slope1']
+    slope2 = traces['Mean_slope2']
+    breakpoints = traces['Mean_split']
+    try:
+        offsets.keys()
+        for chain in range(len(offsets)):
+            ch = 'chain%d'%chain
+            for idx in range(burn, len(offsets[ch]), thin):
+                x = arange(180)[:,np.newaxis]
+                y = piecewise_predictor(x, breakpoints[ch][idx], offsets[ch][idx],
+                        slope1[ch][idx], slope2[ch][idx])
+                plot(x,y,'r', alpha=0.1)
+    except AttributeError:
+        for idx in range(burn, len(offsets), thin):
+            x = arange(180)[:,np.newaxis]
+            y = piecewise_predictor(x, breakpoints[idx], offsets[idx],
+                    slope1[idx], slope2[idx])
+            plot(x,y, 'r', alpha=0.1)
+
 
 def best(name_a, data_a, name_b, data_b):
     pooled_data = np.concatenate([data_a,data_b])
@@ -46,9 +113,8 @@ def run_best():
         'B Std': b.std(),
         'Nu-1': 100}
     with m:
-        step = pm.Metropolis()
-        #step = pm.Slice()
-        trace = pm.sample(15000, step, start, tune=500, njobs=3, progressbar=True)
+        step = pm.Metropolis(blocked=False)
+        trace = pm.sample(10000, step, start, tune=1000, njobs=3, progressbar=False)
         pm.traceplot(trace)
     show()
     return m, trace
@@ -105,16 +171,21 @@ def piecewise_linear(y,x):
 def piecewise_durations(y,x,observer):
     # Different slopes for different observers.
     num_observer = len(np.unique(observer))
+    print num_observer
     with Model() as pl:
-        split = Uniform('Breakpoint', lower=0, upper=180, shape=num_observer)
-
-        obs_offset = Normal('Mean_offset', mu=y.mean(), sd=y.std()*1000)
+        obs_splits = TruncatedNormal('Mean_split', mu=45, sd=45, lower=0, 
+                upper=180)
+        obs_offset = Normal('Mean_offset', mu=y.mean(), sd=y.std()*10)
         obs_slopes1 = Normal('Mean_slope1', mu=0,sd=100)
         obs_slopes2 = Normal('Mean_slope2', mu=0,sd=100)
-
-        intercept = Normal('Offsets', mu=obs_offset, sd=y.std()*1000, shape=num_observer)
-        slopes1 = Normal('Slope1', mu=obs_slopes1, sd=100, shape=(num_observer))
-        slopes2 = Normal('Slope2', mu=obs_slopes2, sd=100, shape=(num_observer))
+        
+        split = TruncatedNormal('Breakpoint', mu=obs_splits,
+                sd=5, lower=0, upper=180, shape=(num_observer,))
+        intercept = Normal('Offsets', mu=obs_offset, sd=y.std()*10, 
+                shape=(num_observer,))
+        slopes1 = Normal('Slope1', mu=obs_slopes1, sd=10, 
+                shape=(num_observer,))
+        slopes2 = Normal('Slope2', mu=obs_slopes2, sd=10, shape=(num_observer,))
 
         mu = piecewise_predictor(x, split[observer], 
                 intercept[observer], slopes1[observer], slopes2[observer])
@@ -124,13 +195,16 @@ def piecewise_durations(y,x,observer):
 def run_fixdur():
     import cPickle
     dur, fa, obs = cPickle.load(open('durtest.pickle'))
-    print type(obs)
-    m = piecewise_durations(dur.data, fa.data, obs.data-1)
+    m = piecewise_durations(dur, fa, obs-1)
     with m:
-        step = pm.Metropolis()
-        #step = pm.NUTS()
-        trace = pm.sample(10000, step, {}, tune=150, njobs=2,
-                progressbar=True, trace='text')
+        start = pm.find_MAP() #cPickle.load(open('fixdur_map.pickle'))
+        step = pm.Metropolis(vars=[m.named_vars['Mean_offset'],
+            m.named_vars['Mean_slope1'], m.named_vars['Mean_slope2'], 
+            m.named_vars['Mean_split']], blocked=False)
+        step2 = pm.Metropolis(vars=[m.named_vars['Slope1'], 
+            m.named_vars['Slope2'], m.named_vars['Offsets'], m.named_vars['Breakpoint']])
+        trace = pm.sample(5000, [step, step2], start, tune=1000, njobs=1,
+                progressbar=True)
     return trace
 
 def run_pl():
@@ -173,18 +247,17 @@ def run_sig():
     noise_responses  = binom.rvs(100, 0.69, size=10)
     m = sig_detect(signal_responses, noise_responses, 10, 100)
     with m:
-        step = pm.Metropolis(blocked=False)
-        #start = pm.find_MAP()
+        #step = pm.Metropolis(blocked=False)
+        step = pm.HamiltonianMC()
+        start = pm.find_MAP()
         #start = {'Pr. mean discrim.':0.0, 'Pr. mean bias':0.0,
         #         'taud':0.001, 'tauc':0.001}
-        start = {}
+        trace = pm.sample(5000, step, start, tune=500, njobs=2)
+    return trace[1000:]
 
-        trace = pm.sample(10000, step, start, tune=5000, njobs=2)
-    return trace
 if __name__ == '__main__':
-    t = run_sig()
-    import cPickle
-    cPickle.dump(t, open('trace.pickle', 'w'))
+    t = run_fixdur()
+    save(t, 'fixdur_trace.hdf5')
     pm.traceplot(t)
     show()
 
