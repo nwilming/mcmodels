@@ -2,7 +2,8 @@
 Bayesian Regression for fixation durations
 '''
 import numpy as np
-from pymc import TruncatedNormal, Gamma
+#from pymc import TruncatedNormal
+from pymc import Gamma
 from pymc import Model, Normal
 import theano.tensor as Tns
 import pymc as pm
@@ -46,7 +47,8 @@ def traceplot(traces, thin, burn):
 def predict(traces, thin, burn,
             params=None,
             variables=None,
-            obs=None):
+            obs=None,
+            plot=True):
     '''
     Plot the saccadic momentum effect by sampling from the
     posterior.
@@ -76,7 +78,57 @@ def predict(traces, thin, burn,
                 x, breakpoints[idx], offsets[idx],
                 slope1[idx], slope2[idx])
             res.append(y)
-            plt.plot(x, s*y+m, color, alpha=0.1)
+            if plot:
+                plt.plot(x, s*y+m, color, alpha=0.1)
+    return res
+
+def predict_cond(traces, thin, burn,
+            variables=None,
+            condition=0,
+            no_add = False):
+    '''
+    Plot the saccadic momentum effect by sampling from the
+    posterior.
+    '''
+    if variables is None:
+        variables = ['', 'Mean_']
+    prefix = 'Cond_'
+    if not no_add:
+        coffsets = get_values(traces, prefix+'Offset', thin, burn)[:, condition]
+        cslope1 = get_values(traces, prefix+'Slope1', thin, burn)[:, condition]
+        cslope2 = get_values(traces, prefix+'Slope2', thin, burn)[:, condition]
+        cbreakpoints = get_values(traces, prefix+'Split', thin, burn)[:, condition]
+    else:
+        coffsets = 0
+        cslope1 = 0
+        cslope2 = 0
+        cbreakpoints = 0
+    res = []
+    for prefix in variables:
+        if not prefix == '':
+            offsets = get_values(traces, prefix+'Offset', thin, burn) + coffsets
+            slope1 = get_values(traces, prefix+'Slope1', thin, burn) + cslope1
+            slope2 = get_values(traces, prefix+'Slope2', thin, burn) + cslope2
+            breakpoints = get_values(traces, prefix+'Split', thin, burn) + cbreakpoints
+            for idx in range(len(offsets)):
+                x = np.arange(180)[:, np.newaxis]
+                y = piecewise_predictor(
+                    x, breakpoints[idx], offsets[idx],
+                    slope1[idx], slope2[idx])
+                res.append(y)
+        else:
+            for obs in range(get_values(traces, prefix+'Offset', thin, burn).shape[1]): 
+                offsets = get_values(traces, prefix+'Offset', thin, burn)[:,obs] + coffsets
+                slope1 = get_values(traces, prefix+'Slope1', thin, burn)[:,obs] + cslope1
+                slope2 = get_values(traces, prefix+'Slope2', thin, burn)[:,obs] + cslope2
+                breakpoints = get_values(traces, prefix+'Split', thin, burn)[:,obs] + cbreakpoints
+                for idx in range(len(offsets)):
+                    x = np.arange(180)[:, np.newaxis]
+                    y = piecewise_predictor(
+                        x, breakpoints[idx], offsets[idx],
+                        slope1[idx], slope2[idx])
+                    res.append(y)
+
     return res
 
 
@@ -171,6 +223,55 @@ def normal_model(y, x, observer):
     return pl
 
 
+
+def appc_gamma_model(
+        y,
+        observer,
+        ambiguity_regressor,
+        context,
+        observed=True):
+    '''
+    Hierarchical Gamma model to predict APPC data.
+    '''
+    num_obs_ctxt = len(np.unique(observer[context == 1]))
+    num_obs_noctxt = len(np.unique(observer[context == 0]))
+    obs = [num_obs_noctxt, num_obs_ctxt]
+    with Model() as pl:
+        # Population level:
+        obs_ambiguity = Normal('Mean_Ambiguity', mu=0, sd=50.0)
+
+        #obs_sd_offset = pm.Gamma(
+        #    'Obs_SD_Offset', *gamma_params(mode=1.0, sd=100.0))
+        #obs_sd_ambiguity = pm.Gamma(
+        #    'Obs_SD_ambiguity', *gamma_params(mode=1, sd=100.))
+        # Define variable for sd of data distribution:
+        data_sd = pm.Gamma('Data_SD', *gamma_params(mode=y.std(), sd=y.std()))
+        for ctxt, label in zip([1], ['context', 'nocontext']):
+            obs_offset = Normal('Mean_Offset_'+label, mu=y.mean(),
+                sd=y.std()*10.0)
+            # Observer level:
+            #offset = Normal(
+            #    'Offset_'+label, mu=obs_offset, sd=obs_sd_offset,
+            #    shape=(obs[ctxt],))
+
+            ambiguity = Normal(
+                'Ambiguity_'+label, mu=obs_ambiguity, sd=20, #obs_sd_ambiguity,
+                shape=(obs[ctxt],))
+
+            # Compute predicted mode for each fixation:
+            data = y[context == ctxt]
+            obs_c = observer[context == ctxt]
+            ambig_reg_c = ambiguity_regressor[context == ctxt]
+            mode = (obs_offset + 
+                    ambiguity[obs_c]*ambig_reg_c)
+            # Convert to shape rate parameterization
+            shape, rate = gamma_params(mode, data_sd)
+            print 'Data_'+label
+            data_dist = Gamma('Data_'+label, shape, rate, observed=data)
+    return pl
+
+
+
 def gamma_model(y, x, observer, observed=True):
     '''
     Hierarchical Gamma model to predict fixation durations.
@@ -221,19 +322,91 @@ def gamma_model(y, x, observer, observed=True):
         data_pred = Gamma('Predictive', shape, rate, shape = y.shape)
     return pl
 
-def sample_model(model, steps, tune=None, njobs=1):
+def gamma_model_2conditions(y, x, observer, condition, observed=True):
+    '''
+    Hierarchical Gamma model to predict fixation durations.
+    '''
+    # Different slopes for different observers.
+    num_observer = len(np.unique(observer))
+    print '\n Num Observers: %d \n' % num_observer
+    with Model() as pl:
+        obs_splits = TruncatedNormal(
+            'Mean_Split', mu=90,
+            sd=500, lower=5, upper=175)
+        obs_offset = Normal('Mean_Offset', mu=y.mean(), sd=y.std()*10.0)
+        obs_slopes1 = Normal('Mean_Slope1', mu=0.0, sd=1.0)
+        obs_slopes2 = Normal('Mean_Slope2', mu=0, sd=1.0)
+
+        obs_sd_split = pm.Gamma(
+            'Obs_SD_Split', *gamma_params(mode=1.0, sd=100.0))
+
+        obs_sd_intercept = pm.Gamma(
+            'Obs_SD_Offset', *gamma_params(mode=1, sd=100.))
+
+        obs_sd_slopes1 = pm.Gamma(
+            'Obs_SD_slope1', *gamma_params(mode=.01, sd=2.01))
+        obs_sd_slopes2 = pm.Gamma(
+            'Obs_SD_slope2', *gamma_params(mode=.01, sd=2.01))
+
+        data_sd = pm.Gamma('Data_SD', *gamma_params(mode=y.std(), sd=y.std()))
+
+        split = TruncatedNormal(
+            'Split', mu=obs_splits, sd=obs_sd_split,
+            lower=5, upper=175, shape=(num_observer,))
+
+        intercept = Normal(
+            'Offset', mu=obs_offset, sd=obs_sd_intercept,
+            shape=(num_observer,))
+        slopes1 = Normal(
+            'Slope1', mu=obs_slopes1, sd=obs_sd_slopes1,
+            shape=(num_observer,))
+        slopes2 = Normal(
+            'Slope2', mu=obs_slopes2, sd=obs_sd_slopes2,
+            shape=(num_observer,))
+        # Now add the condition part
+        # 
+        split_cond = Normal(
+            'Cond_Split', mu=0, sd=10, shape=(2,))
+        intercept_cond = Normal(
+            'Cond_Offset', mu=0, sd=20,
+            shape=(2,))
+        slopes1_cond = Normal(
+            'Cond_Slope1', mu=0, sd=1,
+            shape=(2,))
+        slopes2_cond = Normal(
+            'Cond_Slope2', mu=0, sd=1,
+            shape=(2,))
+        intercept_cond = intercept_cond - intercept_cond.mean()
+        split_cond = split_cond - split_cond.mean()
+        slopes1_cond = slopes1_cond - slopes1_cond.mean()
+        slopes2_cond = slopes2_cond - slopes2_cond.mean()
+
+        mu_sub = piecewise_predictor(
+            x, 
+            split[observer] + split_cond[condition], 
+            intercept[observer] + intercept_cond[condition],
+            slopes1[observer] + slopes1_cond[condition], 
+            slopes2[observer] + slopes2_cond[condition]
+            )
+
+        shape, rate = gamma_params(mu_sub, data_sd)
+        data = Gamma('Data', shape, rate, observed=y)
+    return pl
+
+
+def sample_model(model, steps, tune=None, njobs=1, observed=['Data']):
     if tune is None:
         tune = steps/2
     with model:
         start = pm.find_MAP()  # cPickle.load(open('fixdur_map.pickle'))
         non_blocked_step = pm.Metropolis(
             vars=[v for k, v in model.named_vars.iteritems()
-                  if ('Obs_SD' in k) or ('Mean_' in k) and not (k == 'Data')],
+                  if ('Obs_SD' in k) or ('Mean_' in k) and not (k in set(observed))],
             blocked=False)
         blocked = pm.Metropolis(
             vars=[v for k, v in model.named_vars.iteritems()
                   if not (('Obs_SD' in k) or ('Mean_' in k))
-                  and not (k == 'Data')],
+                  and not (k in set(observed))],
             blocked=True)
         trace = pm.sample(
             steps, [non_blocked_step, blocked], start,
@@ -254,6 +427,43 @@ def save(traces, filename):
                 a = f.create_group(var)
                 for i, chain in enumerate(data):
                     a.create_dataset('chain%d' % i, data=chain)
+
+
+def gamma_best(y1, observer1, 
+               y2, observer2):
+    '''
+    Hierarchical Gamma model to predict fixation durations.
+    '''
+    # Different slopes for different observers.
+    num_observer = len(np.unique(observer1))
+    print '\n Num Observers: %d \n' % num_observer
+    with Model() as pl:
+        obs_offset1 = Normal('Mean_Offset_1', mu=y1.mean(), sd=y1.std()*10.0)
+        obs_sd_intercept1 = pm.Gamma(
+            'Obs_SD_Offset_1', *gamma_params(mode=1, sd=100.))
+
+        data_sd = pm.Gamma('Data_SD', *gamma_params(mode=y1.std(), sd=y1.std()))
+
+        intercept1 = Normal(
+            'Offset_1', mu=obs_offset1, sd=obs_sd_intercept1,
+            shape=(num_observer,))
+
+        shape1, rate1 = gamma_params(intercept1[observer1], data_sd)
+        data1 = Gamma('Data_1', shape1, rate1, observed=y1)
+
+        obs_offset2 = Normal('Mean_Offset_2', mu=y2.mean(), sd=y2.std()*10.0)
+        obs_sd_intercept2 = pm.Gamma(
+            'Obs_SD_Offset_2', *gamma_params(mode=1, sd=100.))
+
+        intercept2 = Normal(
+            'Offset_2', mu=obs_offset2, sd=obs_sd_intercept2,
+            shape=(num_observer,))
+
+        shape2, rate2 = gamma_params(intercept2[observer2], data_sd)
+        data2 = Gamma('Data_2', shape2, rate2, observed=y2)
+   
+    return pl
+
 
 
 def get_values(traces, name, thin, burn):
@@ -381,11 +591,67 @@ def make_viz(model, size = (4,4)):
         plt.title(name)
         sns.despine()
 
+
+def run_best_avormberg():
+    '''
+    Run the model on sample data.
+    '''
+    import cPickle
+    dur, fa, obs, cond = cPickle.load(open('avormberg_data.pickle'))
+
+    #  fixx = dm[dm.condition==1]
+    #  free = dm[dm.condition==2]
+
+    m = gamma_model_2conditions(dur, fa, obs, cond)
+    return sample_model(m, 15000)
+
+def sample_model_appc(model, steps, tune=None, njobs=1, observed=['Data']):
+    if tune is None:
+        tune = steps/2
+    with model:
+        start = pm.find_MAP() 
+        non_blocked_step = pm.Metropolis(
+            vars=[v for k, v in model.named_vars.iteritems()
+                  if ('Obs_SD' in k) or ('Mean_' in k) and not (k in set(observed))],
+            blocked=False)
+        blocked = pm.Metropolis(
+            vars=[v for k, v in model.named_vars.iteritems()
+                  if not (('Obs_SD' in k) or ('Mean_' in k))
+                  and not (k in set(observed))],
+            blocked=False)
+        print blocked, non_blocked_step
+        trace = pm.sample(
+            steps, [non_blocked_step, blocked], start,
+            tune=tune, njobs=njobs, progressbar=True)
+    return trace
+
+def run_appc_model():
+    '''
+    Run appc model and load data for it...
+    '''
+    from scipy.io import loadmat
+    data = loadmat('bayes_datamat.mat')
+    context = data['datamat']['context'][0, 0][0].astype(int)
+    observer = data['datamat']['subject'][0, 0][0].astype(int)
+    ambiguity_regressor = data['datamat']['ambiguity'][0, 0][0]
+    duration = data['datamat']['fd'][0, 0][0]
+    
+    print duration[context].mean()
+    print duration[~context].mean()
+
+    m = appc_gamma_model(
+        duration,
+        observer.astype(int),
+        ambiguity_regressor,
+        context)
+    return sample_model_appc(m, 50000, observed=['Data_context' ])
+
+
 if __name__ == '__main__':
     import sys
     filename = sys.argv[1]
     # t = run_test_case() #run_fixdur()
-    t = run_fixdur()
+    t = run_appc_model()
     save(t, filename)
     plt.figure()
     pm.traceplot(t)

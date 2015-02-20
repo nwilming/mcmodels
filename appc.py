@@ -22,7 +22,7 @@ class TruncatedNormal(pm.Continuous):
             self, mu=0.0, tau=None, sd=None, lower=0, upper=1, *args, **kwargs):
         super(TruncatedNormal, self).__init__(*args, **kwargs)
         self.mean = self.median = self.mode = self.mu = mu
-        self.tau = pm.get_tau(tau=tau, sd=sd)
+        self.tau = pm.distributions.continuous.get_tau(tau=tau, sd=sd)
         self.variance = 1. / self.tau
         self.lower = lower
         self.upper = upper
@@ -31,7 +31,7 @@ class TruncatedNormal(pm.Continuous):
         tau = self.tau
         mu = self.mu
         lower, upper = self.lower, self.upper
-        return pm.bound((-tau * (value - mu) ** 2 + np.log(tau / np.pi / 2.)) / 2.,
+        return pm.distributions.continuous.bound((-tau * (value - mu) ** 2 + np.log(tau / np.pi / 2.)) / 2.,
                         tau > 0, value >= lower, value <= upper)
 
 
@@ -129,17 +129,52 @@ def appc_gamma_model(
             mode = (
                 offset_transformed[obs_c] +
                 obs_ambiguity_transformed[ambig_reg_c == 1])
-            # Effect coding
-            #mode = (
-            #    offset[obs_c] +
-            #    obs_ambiguity * (ambig_reg_c == 1) + 
-            #    obs_ambiguity * -(ambig_reg_c == -1))
-
             # Convert to shape rate parameterization
             shape, rate = gamma_params(mode, data_sd)
-            print 'Data_' + label
             data_dist = Gamma('Data_' + label, shape, rate, observed=data)
     return pl
+
+
+def appc_subject_model(
+        y,
+        observer,
+        ambiguity_regressor,
+        context,
+        observed=True):
+    '''
+    Hierarchical Gamma model to predict APPC data with no subject specific distributions.
+    '''
+    num_obs_ctxt = len(np.unique(observer[context == 1]))
+    num_obs_noctxt = len(np.unique(observer[context == 0]))
+    obs = [num_obs_noctxt, num_obs_ctxt]
+    with Model() as pl:
+        # Population level:
+        obs_ambiguity = TruncatedNormal(
+            'DNP Mean_Ambiguity', mu=0, sd=500.0, shape=2, lower=-100, upper=100)
+
+        # Define variable for sd of data distribution:
+        data_sd = pm.Gamma('Data_SD', *gamma_params(mode=y.std(), sd=y.std()))
+        for ctxt, label in zip([1, 0], ['context', 'nocontext']):
+            obs_offset = TruncatedNormal('DNP Mean_Offset_' + label, mu=y.mean(),
+                                sd=y.std() * 1.0, lower=0, upper=np.inf)
+
+            # Compute predicted mode for each fixation:
+            data = y[context == ctxt]
+            ambig_reg_c = ambiguity_regressor[context == ctxt]
+
+            b0 = obs_ambiguity.mean()
+            obs_ambiguity_transformed = Deterministic("DNS Population Ambiguity" +label , obs_ambiguity-b0 )
+            obs_offset_transformed = Deterministic('DNS Population Offsets ' + label, obs_offset+b0)
+
+            # Dummy coding
+            mode = (
+                obs_offset_transformed +
+                obs_ambiguity_transformed[ambig_reg_c == 1])
+            # Convert to shape rate parameterization
+            shape, rate = gamma_params(mode, data_sd)
+            data_dist = Gamma('Data_' + label, shape, rate, observed=data)
+    return pl
+
 
 
 def save(traces, filename):
@@ -171,7 +206,7 @@ def get_values(traces, name, thin, burn):
     return traces[name][burn::thin]
 
 
-def sample_model_appc(model, steps, tune=None, njobs=1, observed=['Data']):
+def sample_model_appc(model, steps, tune=None, njobs=4, observed=['Data']):
     if tune is None:
         tune = steps / 2
     with model:
@@ -185,33 +220,53 @@ def sample_model_appc(model, steps, tune=None, njobs=1, observed=['Data']):
                   if not (('Obs_SD' in k) or ('Mean_' in k))
                   and not (k in set(observed)) and not k.startswith('DNS')],
             blocked=True)
-        print blocked, non_blocked_step
         trace = pm.sample(
             steps, [non_blocked_step, blocked], start,
             tune=tune, njobs=njobs, progressbar=True)
     return trace
 
 
+from scipy.io import loadmat
+
+def get_appc_model():
+    data = loadmat('bayes_datamat_subject.mat')['datamat_acrStim']
+    context = data['context'][0, 0][0].astype(int)
+    observer = data['subject'][0, 0][0].astype(int)
+    ambiguity_regressor = data['ambiguity'][0, 0][0].astype(int)
+    duration = data['fd'][0, 0][0]
+    idnan = np.isnan(context) | np.isnan(observer) | np.isnan(ambiguity_regressor) | np.isnan(duration)
+
+    m = appc_gamma_model(
+        duration[~idnan],
+        observer.astype(int)[~idnan],
+        ambiguity_regressor[~idnan],
+        context[~idnan])
+    return m
+
 def run_appc_model():
     '''
     Run appc model and load data for it...
     '''
-    from scipy.io import loadmat
-    data = loadmat('bayes_datamat.mat')
-    context = data['datamat']['context'][0, 0][0].astype(int)
-    observer = data['datamat']['subject'][0, 0][0].astype(int)
-    ambiguity_regressor = data['datamat']['ambiguity'][0, 0][0].astype(int)
-    print ambiguity_regressor
-    duration = data['datamat']['fd'][0, 0][0]
+    return sample_model_appc(get_appc_model(), 500000, observed=['Data_context', 'Data_nocontext', ])
 
-    print duration[context].mean()
-    print duration[~context].mean()
+def run_appc_rt_model():
+    '''
+    Run appc model and load data for it...
+    '''
+    from scipy.io import loadmat
+    
+    data = loadmat('bayes_datamat_rt.mat')['datamatRT']
+    context = data['context'][0, 0][0].astype(int)
+    observer = data['subject'][0, 0][0].astype(int)
+    ambiguity_regressor = data['ambiguity'][0, 0][0].astype(int)
+    rt = data['rt'][0, 0][0]
+    idnan = np.isnan(context) | np.isnan(observer) | np.isnan(ambiguity_regressor) | np.isnan(rt)
 
     m = appc_gamma_model(
-        duration,
-        observer.astype(int),
-        ambiguity_regressor,
-        context)
+        rt[~idnan],
+        observer.astype(int)[~idnan],
+        ambiguity_regressor[~idnan],
+        context[~idnan])
     return sample_model_appc(
         m, 500000, observed=['Data_context', 'Data_nocontext', ])
 
@@ -220,7 +275,7 @@ if __name__ == '__main__':
     import sys
     filename = sys.argv[1]
     # t = run_test_case() #run_fixdur()
-    t = run_appc_model()
+    t = run_appc_rt_model()
     save(t, filename)
     pm.traceplot(t, vars=[v for v in t.varnames if not v.startswith('DNP')])
     plt.show()
