@@ -229,7 +229,7 @@ def sample_model_appc(model, steps, tune=None, njobs=4, observed=['Data']):
 from scipy.io import loadmat
 
 def get_appc_model():
-    data = loadmat('bayes_datamat_subject.mat')['datamat_acrStim']
+    data = loadmat('bayes_datamat.mat')['datamat']
     context = data['context'][0, 0][0].astype(int)
     observer = data['subject'][0, 0][0].astype(int)
     ambiguity_regressor = data['ambiguity'][0, 0][0].astype(int)
