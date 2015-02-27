@@ -243,18 +243,36 @@ def get_appc_model():
         context[~idnan])
     return m
 
+def get_appc_subject_model():
+    data = loadmat('bayes_datamat_spss.mat')['datamat_acrStim']
+    context = data['context'][0, 0][0].astype(int)
+    observer = data['subject'][0, 0][0].astype(int)
+    ambiguity_regressor = data['ambiguity'][0, 0][0].astype(int)
+    duration = data['fd'][0, 0][0]
+    idnan = np.isnan(context) | np.isnan(observer) | np.isnan(ambiguity_regressor) | np.isnan(duration)
+    print duration[~idnan].shape, sum(idnan)
+    m = appc_subject_model(
+        duration[~idnan],
+        observer.astype(int)[~idnan],
+        ambiguity_regressor[~idnan],
+        context[~idnan])
+    return m
+
+def run_appc_subject_model():
+    '''
+    Run appc model and load data for it...
+    '''
+    return sample_model_appc(get_appc_subject_model(), 50000, observed=['Data_context', 'Data_nocontext', ])
+
+
 def run_appc_model():
     '''
     Run appc model and load data for it...
     '''
     return sample_model_appc(get_appc_model(), 500000, observed=['Data_context', 'Data_nocontext', ])
 
-def run_appc_rt_model():
-    '''
-    Run appc model and load data for it...
-    '''
-    from scipy.io import loadmat
-    
+
+def get_appc_rt_model():
     data = loadmat('bayes_datamat_rt.mat')['datamatRT']
     context = data['context'][0, 0][0].astype(int)
     observer = data['subject'][0, 0][0].astype(int)
@@ -267,15 +285,35 @@ def run_appc_rt_model():
         observer.astype(int)[~idnan],
         ambiguity_regressor[~idnan],
         context[~idnan])
-    return sample_model_appc(
-        m, 500000, observed=['Data_context', 'Data_nocontext', ])
+    return m
+
+def run_appc_rt_model():
+    '''
+    Run appc model and load data for it...
+    '''
+    return sample_model_appc(get_appc_rt_model(), 500000, observed=['Data_context', 'Data_nocontext', ])
+
+
+def get_multi_trace(model, data, chains=1):
+    sd, traces = [], []
+    if chains == 1:
+        sd += [dict((k, data[k][:]) for k in data.keys())]
+    for chain in range(chains):
+        sd += [dict((k, data[k]['chain%i' % chain][:]) for k in data.keys())]
+
+    for i, s in enumerate(sd):
+        t = pm.backends.NDArray('', model)
+        t.samples = s
+        t.chain = i+1
+        traces += [t]
+    return pm.backends.base.MultiTrace(traces)
 
 
 if __name__ == '__main__':
     import sys
     filename = sys.argv[1]
     # t = run_test_case() #run_fixdur()
-    t = run_appc_rt_model()
+    t = run_appc_subject_model()
     save(t, filename)
     pm.traceplot(t, vars=[v for v in t.varnames if not v.startswith('DNP')])
     plt.show()
